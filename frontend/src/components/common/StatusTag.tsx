@@ -3,6 +3,7 @@ import type { ColonyStatus } from '@/types'
 
 const COLORS: Record<ColonyStatus, string> = {
   待投放: 'default',
+  排队中: 'orange',
   在园: 'green',
   转场中: 'gold',
   回场: 'blue'
@@ -14,7 +15,7 @@ export interface StatusTagProps {
   hint?: string
 }
 
-/** 蜂群状态标签：4 种状态各自配色 */
+/** 蜂群状态标签：5 种状态各自配色 */
 export default function StatusTag({ status, hint }: StatusTagProps): JSX.Element {
   return (
     <Tag color={COLORS[status]} data-testid="status-tag">

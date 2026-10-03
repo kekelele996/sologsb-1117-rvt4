@@ -7,12 +7,14 @@ import StatusTag from '@/components/common/StatusTag'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { orchardStore } from '@/stores/orchardStore'
+import { droppointStore } from '@/stores/droppointStore'
 import { uid } from '@/utils/id'
 
-/** 蜂群台账：按群势与状态筛选，支持批量改状态与记录检查备注 */
+/** 蜂群台账（技术员）：按群势与状态筛选，支持批量改状态与记录检查备注 */
 export default function ColoniesPage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
+  const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
 
   const [statusFilter, setStatusFilter] = useState<ColonyStatus | ''>('')
   const [minFrames, setMinFrames] = useState(0)
@@ -45,6 +47,19 @@ export default function ColoniesPage(): JSX.Element {
 
   function orchardName(id: string): string {
     return orchards.find((item) => item.id === id)?.name ?? '未分配地块'
+  }
+
+  /** 由投放点排布反查一群的实际去向（在点 / 排队）；蜂群 currentOrchardId 为兜底 */
+  function placementHint(colony: BeeColony): { orchardId: string; waiting: boolean; dropCode: string } | null {
+    for (const point of dropPoints) {
+      if (point.colonyCodes.includes(colony.code)) {
+        return { orchardId: point.orchardId, waiting: false, dropCode: point.code }
+      }
+      if (point.waitingColonyCodes.includes(colony.code)) {
+        return { orchardId: point.orchardId, waiting: true, dropCode: point.code }
+      }
+    }
+    return colony.currentOrchardId ? { orchardId: colony.currentOrchardId, waiting: false, dropCode: '' } : null
   }
 
   function openCreate(): void {
@@ -127,9 +142,9 @@ export default function ColoniesPage(): JSX.Element {
     <div className="page">
       <div className="page-head">
         <div>
-          <h2 className="page-title">蜂群台账</h2>
+          <h2 className="page-title">蜂群台账 · 技术员</h2>
           <p className="page-sub">
-            按群势与状态筛选蜂群；支持多选批量改状态与统一记录检查备注（会同步最近检查日期）。
+            按群势与状态（含「排队中」）筛选蜂群；批量改状态与统一记录检查备注。往投放点排蜂与撤场请到「排蜂与撤场」页操作。
           </p>
         </div>
         <Button type="primary" onClick={openCreate}>
@@ -197,15 +212,28 @@ export default function ColoniesPage(): JSX.Element {
             },
             { title: '箱型', dataIndex: 'boxType', key: 'box', width: 110 },
             {
-              title: '当前所在地块',
+              title: '投放去向',
               key: 'orchard',
-              render: (_, record: BeeColony) => (record.currentOrchardId ? orchardName(record.currentOrchardId) : '—')
+              render: (_, record: BeeColony) => {
+                const hint = placementHint(record)
+                if (!hint) return '—'
+                return (
+                  <Space size={4}>
+                    <span>{orchardName(hint.orchardId)}</span>
+                    {hint.dropCode ? <Tag color="blue">{hint.dropCode}</Tag> : null}
+                    {hint.waiting ? <Tag color="orange">排队中</Tag> : null}
+                  </Space>
+                )
+              }
             },
             {
               title: '状态',
               key: 'status',
               width: 180,
-              render: (_, record: BeeColony) => <StatusTag status={record.status} hint={record.currentOrchardId ? orchardName(record.currentOrchardId) : undefined} />
+              render: (_, record: BeeColony) => {
+                const hint = placementHint(record)
+                return <StatusTag status={record.status} hint={hint ? orchardName(hint.orchardId) : undefined} />
+              }
             },
             { title: '最近检查', dataIndex: 'lastCheckDate', key: 'check', width: 120 },
             { title: '健康备注', dataIndex: 'healthNote', key: 'note', render: (value: string) => value || '—' },
@@ -273,7 +301,10 @@ export default function ColoniesPage(): JSX.Element {
               </Form.Item>
             </Col>
             <Col span={24}>
-              <Form.Item name="currentOrchardId" label="当前所在地块">
+              <Form.Item
+                name="currentOrchardId"
+                label="当前所在地块（一般由投放点排布自动维护，仅转场等特殊情况手工指定）"
+              >
                 <Select
                   allowClear
                   options={orchards.map((item) => ({ value: item.id, label: `${item.name}（${item.crop}）` }))}

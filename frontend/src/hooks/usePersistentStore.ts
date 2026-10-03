@@ -2,13 +2,15 @@ import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
 import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import { currentWithdrawSignature } from '@/services/withdrawPlan'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
-  value: number
+  /** meta 值（版本号为 number，撤场输入指纹为 string） */
+  value: number | string
 }
 
 /** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 四张表 + 元数据表 */
@@ -29,6 +31,16 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
+    this.version(2).stores({
+      orchards: 'id, name, crop, bloomStart',
+      colonies: 'id, code, status, currentOrchardId',
+      dropPoints: 'id, orchardId, code, dropWindow',
+      routes: 'id, fromDropId, toDropId, departAt',
+      meta: 'key'
+    })
+    // v3：季末验收模型
+    // - 地块新增验收结论 acceptance / 坐果备注 fruitSetNote，旧数据一律按「待验收」补上
+    // - 投放点新增排队队列 waitingColonyCodes，旧数据补空队列
     this.version(SCHEMA_VERSION)
       .stores({
         orchards: 'id, name, crop, bloomStart',
@@ -39,11 +51,22 @@ class BeeRouteDb extends Dexie {
       })
       .upgrade(async (tx) => {
         await tx
+          .table<Orchard, string>('orchards')
+          .toCollection()
+          .modify((orchard) => {
+            if (!orchard.acceptance) {
+              orchard.acceptance = '待验收'
+            }
+            if (orchard.fruitSetNote === undefined) {
+              orchard.fruitSetNote = ''
+            }
+          })
+        await tx
           .table<DropPoint, string>('dropPoints')
           .toCollection()
           .modify((point) => {
-            if (!point.capacityBoxes) {
-              point.capacityBoxes = 8
+            if (!Array.isArray(point.waitingColonyCodes)) {
+              point.waitingColonyCodes = []
             }
           })
       })
@@ -106,7 +129,9 @@ export async function seedDemoData(): Promise<void> {
       ownerContact: '135****2043（周园主）',
       accessibility: '大车可达',
       historyYears: [year - 2, year - 1],
-      note: '主栽富士，行距 4 m，南坡'
+      note: '主栽富士，行距 4 m，南坡',
+      acceptance: '达标',
+      fruitSetNote: '坐果均匀，边行略稀，整体达标'
     },
     {
       id: 'orc_cherry',
@@ -121,7 +146,9 @@ export async function seedDemoData(): Promise<void> {
       ownerContact: '138****7712（李园主）',
       accessibility: '仅小车',
       historyYears: [year - 1],
-      note: '坡地梯田，需小车倒运蜂箱'
+      note: '坡地梯田，需小车倒运蜂箱',
+      acceptance: '待验收',
+      fruitSetNote: ''
     },
     {
       id: 'orc_rape',
@@ -136,7 +163,9 @@ export async function seedDemoData(): Promise<void> {
       ownerContact: '137****9981（合作社）',
       accessibility: '大车可达',
       historyYears: [year - 1],
-      note: '连片油菜，与苹果花期部分重叠'
+      note: '连片油菜，与苹果花期部分重叠',
+      acceptance: '待验收',
+      fruitSetNote: ''
     }
   ])
 
@@ -159,7 +188,7 @@ export async function seedDemoData(): Promise<void> {
       strengthFrames: 6,
       boxType: '标准继箱',
       currentOrchardId: 'orc_rape',
-      status: '转场中',
+      status: '在园',
       lastCheckDate: `${year}-04-05`,
       healthNote: '轻微螨害，转场后需治螨'
     },
@@ -173,6 +202,28 @@ export async function seedDemoData(): Promise<void> {
       status: '待投放',
       lastCheckDate: `${year}-04-02`,
       healthNote: '新分群，群势偏弱'
+    },
+    {
+      id: 'col_004',
+      code: 'Q-04',
+      species: '意蜂',
+      strengthFrames: 7,
+      boxType: '标准继箱',
+      currentOrchardId: 'orc_ap',
+      status: '排队中',
+      lastCheckDate: `${year}-04-08`,
+      healthNote: 'A-01 容量已满，排队等补位'
+    },
+    {
+      id: 'col_005',
+      code: 'Q-05',
+      species: '中蜂',
+      strengthFrames: 5,
+      boxType: '平箱',
+      currentOrchardId: '',
+      status: '待投放',
+      lastCheckDate: `${year}-04-06`,
+      healthNote: ''
     }
   ])
 
@@ -183,13 +234,14 @@ export async function seedDemoData(): Promise<void> {
       longitude: 107.4108,
       latitude: 34.6142,
       code: 'A-01',
-      capacityBoxes: 8,
+      capacityBoxes: 1,
       shade: '北侧有防风林，午后半阴',
       waterDistance: 220,
       dropWindow: `${year}-04-07`,
       withdrawTime: `${year}-04-19`,
       owner: '周园主',
-      colonyCodes: ['Q-01']
+      colonyCodes: ['Q-01'],
+      waitingColonyCodes: ['Q-04']
     },
     {
       id: 'dp_b01',
@@ -203,7 +255,8 @@ export async function seedDemoData(): Promise<void> {
       dropWindow: `${year}-03-27`,
       withdrawTime: `${year}-04-13`,
       owner: '合作社',
-      colonyCodes: ['Q-02']
+      colonyCodes: ['Q-02'],
+      waitingColonyCodes: []
     },
     {
       id: 'dp_c01',
@@ -217,7 +270,8 @@ export async function seedDemoData(): Promise<void> {
       dropWindow: `${year}-04-11`,
       withdrawTime: `${year}-04-22`,
       owner: '李园主',
-      colonyCodes: ['Q-02']
+      colonyCodes: [],
+      waitingColonyCodes: []
     }
   ])
 
@@ -234,4 +288,8 @@ export async function seedDemoData(): Promise<void> {
       actualNote: '待执行'
     }
   ])
+
+  // 示例撤场安排按当前花期/容量生成，指纹与输入一致（视为有效）
+  await db.meta.put({ key: 'withdrawInputSignature', value: await currentWithdrawSignature() })
+  await db.meta.put({ key: 'withdrawPlanGeneratedAt', value: `${year}-04-09T18:00` })
 }

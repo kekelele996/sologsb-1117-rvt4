@@ -83,9 +83,10 @@ export default function RoutesPage(): JSX.Element {
     <div className="page">
       <div className="page-head">
         <div>
-          <h2 className="page-title">转场路线规划</h2>
+          <h2 className="page-title">转场路线微调 · 技术员</h2>
           <p className="page-sub">
-            在投放点列表中依次选点生成转场顺序与里程；可拖动条目或上下移动调整顺序，里程与耗时实时重算，确认后写回路线表。
+            撤场安排可在「排蜂与撤场」页按验收结论一键重算；本页用于技术员手动微调转场顺序。
+            选点生成顺序与里程，拖动或上下移动调整后实时重算，保存后即作为当前撤场转场路线（会覆盖自动安排）。
           </p>
         </div>
         <Space>

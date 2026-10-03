@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Alert, Card, Col, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
-import type { BeeColony, DropPoint, Orchard } from '@/types'
+import type { AcceptanceResult, BeeColony, DropPoint, Orchard } from '@/types'
 import FlowerWindowBar from '@/components/common/FlowerWindowBar'
 import RouteMap from '@/components/common/RouteMap'
 import StatusTag from '@/components/common/StatusTag'
@@ -9,8 +9,15 @@ import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
+import { withdrawPlanStore } from '@/stores/withdrawPlanStore'
 import { bloomDays, flowerWindowOverlap } from '@/utils/geo'
 import { suggestColonyBoxes } from '@/types'
+
+const ACCEPTANCE_COLORS: Record<AcceptanceResult, string> = {
+  待验收: 'default',
+  达标: 'green',
+  不达标: 'red'
+}
 
 interface Placement {
   colonyCode: string
@@ -34,6 +41,7 @@ interface ScheduleRow {
   days: number
   suggest: number
   placedCodes: string[]
+  waitingCodes: string[]
   dropCodes: string[]
   conflicted: boolean
 }
@@ -44,7 +52,12 @@ export default function SchedulePage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const planStale = usePersistentStore(withdrawPlanStore, (state) => state.stale)
   const [scope, setScope] = useState<'all' | 'conflict'>('all')
+
+  useEffect(() => {
+    void withdrawPlanStore.getState().refresh()
+  }, [orchards, dropPoints, routes])
 
   /** 由投放点的群号安排 + 蜂群当前所在地块，汇总出「某群在某地块」的时间占用 */
   const placements = useMemo<Placement[]>(() => {
@@ -100,17 +113,19 @@ export default function SchedulePage(): JSX.Element {
     () =>
       orchards.map((orchard) => {
         const related = placements.filter((item) => item.orchardId === orchard.id)
+        const orchardPoints = dropPoints.filter((item) => item.orchardId === orchard.id)
         return {
           key: orchard.id,
           orchard,
           days: bloomDays(orchard),
           suggest: suggestColonyBoxes(orchard),
           placedCodes: Array.from(new Set(related.map((item) => item.colonyCode))),
+          waitingCodes: Array.from(new Set(orchardPoints.flatMap((item) => item.waitingColonyCodes))),
           dropCodes: Array.from(new Set(related.map((item) => item.dropCode))),
           conflicted: conflicts.some((item) => item.a.orchardId === orchard.id || item.b.orchardId === orchard.id)
         }
       }),
-    [orchards, placements, conflicts]
+    [orchards, placements, conflicts, dropPoints]
   )
 
   const visibleRows = scope === 'conflict' ? rows.filter((row) => row.conflicted) : rows
@@ -138,6 +153,15 @@ export default function SchedulePage(): JSX.Element {
           ]}
         />
       </div>
+
+      {planStale ? (
+        <Alert
+          type="error"
+          showIcon
+          message="撤场安排已失效：托管队改过花期或容量，技术员需到「排蜂与撤场」页重算后撤场"
+          style={{ marginBottom: 12 }}
+        />
+      ) : null}
 
       {conflicts.length > 0 ? (
         <Alert
@@ -171,11 +195,13 @@ export default function SchedulePage(): JSX.Element {
                   <Tag color={row.orchard.accessibility === '大车可达' ? 'green' : row.orchard.accessibility === '仅小车' ? 'gold' : 'red'}>
                     {row.orchard.accessibility}
                   </Tag>
+                  <Tag color={ACCEPTANCE_COLORS[row.orchard.acceptance]}>验收·{row.orchard.acceptance}</Tag>
                   {row.placedCodes.length > 0 ? (
                     row.placedCodes.map((code) => <Tag key={code} color="cyan">已投放 {code}</Tag>)
                   ) : (
                     <Tag>尚未安排群体</Tag>
                   )}
+                  {row.waitingCodes.length > 0 ? <Tag color="orange">排队 {row.waitingCodes.length} 群</Tag> : null}
                   {row.conflicted ? <Tag color="red">存在冲突</Tag> : null}
                 </Space>
               </div>
@@ -218,7 +244,16 @@ export default function SchedulePage(): JSX.Element {
               render: (_, record: ScheduleRow) => (
                 <Space wrap size={4}>
                   {record.placedCodes.length > 0 ? record.placedCodes.map((code) => <Tag key={code}>{code}</Tag>) : <span>—</span>}
+                  {record.waitingCodes.length > 0 ? <Tag color="orange">排队 {record.waitingCodes.length}</Tag> : null}
                 </Space>
+              )
+            },
+            {
+              title: '验收结论',
+              key: 'acceptance',
+              width: 110,
+              render: (_, record: ScheduleRow) => (
+                <Tag color={ACCEPTANCE_COLORS[record.orchard.acceptance]}>{record.orchard.acceptance}</Tag>
               )
             },
             {

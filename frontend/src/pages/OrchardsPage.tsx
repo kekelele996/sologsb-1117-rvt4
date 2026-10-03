@@ -1,16 +1,22 @@
 import { useMemo, useState } from 'react'
 import { Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from 'antd'
 import dayjs from 'dayjs'
-import type { DropPoint, Orchard } from '@/types'
-import { ACCESSIBILITIES, CROPS, suggestColonyBoxes } from '@/types'
+import type { AcceptanceResult, DropPoint, Orchard } from '@/types'
+import { ACCESSIBILITIES, ACCEPTANCE_RESULTS, CROPS, suggestColonyBoxes } from '@/types'
 import CoordPicker from '@/components/common/CoordPicker'
 import FlowerWindowBar from '@/components/common/FlowerWindowBar'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { droppointStore } from '@/stores/droppointStore'
-import { colonyStore } from '@/stores/colonyStore'
+import { withdrawPlanStore } from '@/stores/withdrawPlanStore'
 import { bloomDays } from '@/utils/geo'
 import { uid } from '@/utils/id'
+
+const ACCEPTANCE_COLORS: Record<AcceptanceResult, string> = {
+  待验收: 'default',
+  达标: 'green',
+  不达标: 'red'
+}
 
 interface OrchardFormValues {
   name: string
@@ -22,6 +28,8 @@ interface OrchardFormValues {
   historyYears: string
   note: string
   bloom: [dayjs.Dayjs, dayjs.Dayjs]
+  acceptance: AcceptanceResult
+  fruitSetNote: string
 }
 
 interface DropFormValues {
@@ -32,14 +40,12 @@ interface DropFormValues {
   dropWindow: dayjs.Dayjs
   withdrawTime: dayjs.Dayjs
   owner: string
-  colonyCodes: string[]
 }
 
-/** 果园地块管理：录入面积与花期后自动给出建议箱数与可达性标记，并维护投放点 */
+/** 果园地块管理（托管队）：地块、花期、投放点容量与验收结论；不负责蜂群排布 */
 export default function OrchardsPage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
-  const colonies = usePersistentStore(colonyStore, (state) => state.rows)
 
   const [orchardModal, setOrchardModal] = useState(false)
   const [editingOrchard, setEditingOrchard] = useState<Orchard | null>(null)
@@ -48,6 +54,7 @@ export default function OrchardsPage(): JSX.Element {
 
   const [dropModal, setDropModal] = useState(false)
   const [dropOwner, setDropOwner] = useState<Orchard | null>(null)
+  const [editingDrop, setEditingDrop] = useState<DropPoint | null>(null)
   const [dropCoord, setDropCoord] = useState({ longitude: 107.41, latitude: 34.61 })
   const [dropForm] = Form.useForm<DropFormValues>()
 
@@ -75,7 +82,9 @@ export default function OrchardsPage(): JSX.Element {
       accessibility: '大车可达',
       historyYears: '2025',
       note: '',
-      bloom: [dayjs().month(3).date(8), dayjs().month(3).date(18)]
+      bloom: [dayjs().month(3).date(8), dayjs().month(3).date(18)],
+      acceptance: '待验收',
+      fruitSetNote: ''
     })
     setOrchardModal(true)
   }
@@ -92,7 +101,9 @@ export default function OrchardsPage(): JSX.Element {
       accessibility: orchard.accessibility,
       historyYears: orchard.historyYears.join('、'),
       note: orchard.note,
-      bloom: [dayjs(orchard.bloomStart), dayjs(orchard.bloomEnd)]
+      bloom: [dayjs(orchard.bloomStart), dayjs(orchard.bloomEnd)],
+      acceptance: orchard.acceptance ?? '待验收',
+      fruitSetNote: orchard.fruitSetNote ?? ''
     })
     setOrchardModal(true)
   }
@@ -115,10 +126,16 @@ export default function OrchardsPage(): JSX.Element {
         .split(/[、,，\s]+/)
         .map((item) => Number(item))
         .filter((item) => Number.isFinite(item) && item > 0),
-      note: values.note?.trim() ?? ''
+      note: values.note?.trim() ?? '',
+      acceptance: values.acceptance,
+      fruitSetNote: values.fruitSetNote?.trim() ?? ''
     }
-    await orchardStore.getState().save(row)
+    const { rejectedCodes } = await orchardStore.getState().save(row)
+    await withdrawPlanStore.getState().refresh()
     message.success(`地块「${row.name}」已保存，建议蜂群 ${suggestColonyBoxes(row)} 箱`)
+    if (rejectedCodes.length > 0) {
+      message.warning(`验收不达标：${rejectedCodes.join('、')} 已退回「待投放」，等待补投`)
+    }
     setOrchardModal(false)
   }
 
@@ -129,11 +146,13 @@ export default function OrchardsPage(): JSX.Element {
       return
     }
     await orchardStore.getState().remove(orchard.id)
+    await withdrawPlanStore.getState().refresh()
     message.success('地块已删除')
   }
 
-  function openDrop(orchard: Orchard): void {
+  function openDropCreate(orchard: Orchard): void {
     setDropOwner(orchard)
+    setEditingDrop(null)
     setDropCoord({ longitude: orchard.longitude, latitude: orchard.latitude })
     const index = dropPoints.filter((item) => item.orchardId === orchard.id).length + 1
     dropForm.setFieldsValue({
@@ -143,8 +162,23 @@ export default function OrchardsPage(): JSX.Element {
       waterDistance: 300,
       dropWindow: dayjs(orchard.bloomStart).subtract(1, 'day'),
       withdrawTime: dayjs(orchard.bloomEnd).add(1, 'day'),
-      owner: '',
-      colonyCodes: []
+      owner: ''
+    })
+    setDropModal(true)
+  }
+
+  function openDropEdit(point: DropPoint, orchard: Orchard): void {
+    setDropOwner(orchard)
+    setEditingDrop(point)
+    setDropCoord({ longitude: point.longitude, latitude: point.latitude })
+    dropForm.setFieldsValue({
+      code: point.code,
+      capacityBoxes: point.capacityBoxes,
+      shade: point.shade,
+      waterDistance: point.waterDistance,
+      dropWindow: dayjs(point.dropWindow),
+      withdrawTime: dayjs(point.withdrawTime),
+      owner: point.owner
     })
     setDropModal(true)
   }
@@ -153,7 +187,7 @@ export default function OrchardsPage(): JSX.Element {
     if (!dropOwner) return
     const values = await dropForm.validateFields()
     const row: DropPoint = {
-      id: uid('dp'),
+      id: editingDrop?.id ?? uid('dp'),
       orchardId: dropOwner.id,
       longitude: dropCoord.longitude,
       latitude: dropCoord.latitude,
@@ -164,20 +198,35 @@ export default function OrchardsPage(): JSX.Element {
       dropWindow: values.dropWindow.format('YYYY-MM-DD'),
       withdrawTime: values.withdrawTime.format('YYYY-MM-DD'),
       owner: values.owner?.trim() ?? '',
-      colonyCodes: values.colonyCodes ?? []
+      // 蜂群排布归技术员：编辑容量时保留既有在点 / 排队队列
+      colonyCodes: editingDrop?.colonyCodes ?? [],
+      waitingColonyCodes: editingDrop?.waitingColonyCodes ?? []
     }
-    await droppointStore.getState().save(row)
-    message.success(`投放点 ${row.code} 已保存`)
+    const { rebalanced } = await droppointStore.getState().save(row)
+    await withdrawPlanStore.getState().refresh()
+    if (editingDrop) {
+      message.success(`投放点 ${row.code} 已更新，撤场安排已失效需重算`)
+      if (rebalanced > 0) message.info(`容量变化已联动：${rebalanced} 群在「在点 / 排队」间调整`)
+    } else {
+      message.success(`投放点 ${row.code} 已保存`)
+    }
     setDropModal(false)
+  }
+
+  async function removeDrop(point: DropPoint): Promise<void> {
+    await droppointStore.getState().remove(point.id)
+    await withdrawPlanStore.getState().refresh()
+    message.success('投放点已删除')
   }
 
   return (
     <div className="page">
       <div className="page-head">
         <div>
-          <h2 className="page-title">果园地块管理</h2>
+          <h2 className="page-title">果园地块管理 · 托管队</h2>
           <p className="page-sub">
-            录入面积与需蜂强度后自动算出建议箱数；可达性以标签标记。每个地块可维护多个蜂群投放点（含可容纳箱数与时间窗）。
+            托管队负责地块、花期、投放点容量与季末验收结论（待验收 / 达标 / 不达标）；蜂群往投放点的排布与撤场由技术员负责。
+            改动花期或容量后，技术员已生成的撤场安排自动失效需重算。
           </p>
         </div>
         <Button type="primary" onClick={openCreate}>
@@ -198,14 +247,17 @@ export default function OrchardsPage(): JSX.Element {
                     {orchard.accessibility}
                   </Tag>
                   <Tag color="orange">建议 {suggestColonyBoxes(orchard)} 箱</Tag>
+                  <Tag color={ACCEPTANCE_COLORS[orchard.acceptance ?? '待验收']}>
+                    验收·{orchard.acceptance ?? '待验收'}
+                  </Tag>
                 </Space>
               }
               extra={
                 <Space>
                   <Button size="small" onClick={() => openEdit(orchard)}>
-                    编辑
+                    编辑 / 验收
                   </Button>
-                  <Button size="small" onClick={() => openDrop(orchard)}>
+                  <Button size="small" onClick={() => openDropCreate(orchard)}>
                     新增投放点
                   </Button>
                   <Button size="small" danger onClick={() => void removeOrchard(orchard)}>
@@ -217,6 +269,7 @@ export default function OrchardsPage(): JSX.Element {
               <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
                 {orchard.areaMu} 亩 · 需蜂 {orchard.colonyIntensity} 箱/亩 · 园主 {orchard.ownerContact || '—'} · 历史授粉{' '}
                 {orchard.historyYears.length > 0 ? orchard.historyYears.join('、') : '—'} 年 · 花期 {bloomDays(orchard)} 天
+                {orchard.fruitSetNote ? ` · 坐果：${orchard.fruitSetNote}` : ''}
               </Typography.Paragraph>
               <FlowerWindowBar orchard={orchard} others={orchards.filter((item) => item.id !== orchard.id)} width={420} />
               <Table<DropPoint>
@@ -228,23 +281,38 @@ export default function OrchardsPage(): JSX.Element {
                 locale={{ emptyText: '暂无投放点' }}
                 columns={[
                   { title: '编号', dataIndex: 'code', key: 'code', width: 80 },
-                  { title: '可容纳', dataIndex: 'capacityBoxes', key: 'cap', width: 80, render: (value: number) => `${value} 箱` },
-                  { title: '投放窗', dataIndex: 'dropWindow', key: 'win', width: 110 },
-                  { title: '撤场', dataIndex: 'withdrawTime', key: 'with', width: 110 },
                   {
-                    title: '安排群号',
-                    key: 'codes',
-                    render: (_, record: DropPoint) =>
-                      record.colonyCodes.length > 0 ? record.colonyCodes.join('、') : '—'
+                    title: '容量',
+                    dataIndex: 'capacityBoxes',
+                    key: 'cap',
+                    width: 90,
+                    render: (value: number) => `${value} 箱`
+                  },
+                  { title: '投放窗', dataIndex: 'dropWindow', key: 'win', width: 105 },
+                  { title: '撤场', dataIndex: 'withdrawTime', key: 'with', width: 105 },
+                  {
+                    title: '在点 / 排队',
+                    key: 'load',
+                    render: (_, record: DropPoint) => (
+                      <Tag color={record.colonyCodes.length >= record.capacityBoxes ? 'orange' : 'green'}>
+                        {record.colonyCodes.length}/{record.capacityBoxes}
+                        {record.waitingColonyCodes.length > 0 ? ` · 排队 ${record.waitingColonyCodes.length}` : ''}
+                      </Tag>
+                    )
                   },
                   {
                     title: '操作',
                     key: 'action',
-                    width: 80,
+                    width: 110,
                     render: (_, record: DropPoint) => (
-                      <Button size="small" danger type="link" onClick={() => void droppointStore.getState().remove(record.id)}>
-                        删除
-                      </Button>
+                      <Space size={0}>
+                        <Button size="small" type="link" onClick={() => openDropEdit(record, orchard)}>
+                          编辑
+                        </Button>
+                        <Button size="small" danger type="link" onClick={() => void removeDrop(record)}>
+                          删除
+                        </Button>
+                      </Space>
                     )
                   }
                 ]}
@@ -254,7 +322,7 @@ export default function OrchardsPage(): JSX.Element {
         ))}
       </Row>
 
-      <Modal title={editingOrchard ? '编辑地块' : '新建地块'} open={orchardModal} onCancel={() => setOrchardModal(false)} onOk={() => void submitOrchard()} width={720} okText="保存">
+      <Modal title={editingOrchard ? '编辑地块 / 出具验收结论' : '新建地块'} open={orchardModal} onCancel={() => setOrchardModal(false)} onOk={() => void submitOrchard()} width={720} okText="保存">
         <Form form={orchardForm} layout="vertical">
           <Row gutter={12}>
             <Col span={12}>
@@ -288,7 +356,7 @@ export default function OrchardsPage(): JSX.Element {
               </Form.Item>
             </Col>
             <Col span={24}>
-              <Form.Item name="bloom" label="盛花期区间" rules={[{ required: true, message: '请选择盛花期区间' }]}>
+              <Form.Item name="bloom" label="盛花期区间（改动后撤场安排失效）" rules={[{ required: true, message: '请选择盛花期区间' }]}>
                 <DatePicker.RangePicker style={{ width: '100%' }} />
               </Form.Item>
             </Col>
@@ -302,6 +370,21 @@ export default function OrchardsPage(): JSX.Element {
                 <Input placeholder="行距、坡向等" />
               </Form.Item>
             </Col>
+            <Col span={8}>
+              <Form.Item name="acceptance" label="季末验收结论（按坐果）" rules={[{ required: true }]}>
+                <Select
+                  options={ACCEPTANCE_RESULTS.map((item) => ({
+                    value: item,
+                    label: item === '不达标' ? '不达标（在点群退回待投放补投）' : item
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={16}>
+              <Form.Item name="fruitSetNote" label="坐果 / 验收备注">
+                <Input placeholder="如 坐果均匀，边行略稀" />
+              </Form.Item>
+            </Col>
           </Row>
           <Form.Item label="经纬度">
             <CoordPicker value={coord} onChange={setCoord} orchards={orchards} dropPoints={dropPoints} />
@@ -311,7 +394,7 @@ export default function OrchardsPage(): JSX.Element {
       </Modal>
 
       <Modal
-        title={`新增投放点 · ${dropOwner?.name ?? ''}`}
+        title={editingDrop ? `编辑投放点 ${editingDrop.code} · ${dropOwner?.name ?? ''}` : `新增投放点 · ${dropOwner?.name ?? ''}`}
         open={dropModal}
         onCancel={() => setDropModal(false)}
         onOk={() => void submitDrop()}
@@ -326,7 +409,7 @@ export default function OrchardsPage(): JSX.Element {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="capacityBoxes" label="可容纳箱数" rules={[{ required: true }]}>
+              <Form.Item name="capacityBoxes" label="可容纳箱数（改动后撤场安排失效）" rules={[{ required: true }]}>
                 <InputNumber min={1} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
@@ -355,15 +438,13 @@ export default function OrchardsPage(): JSX.Element {
                 <Input placeholder="如 北侧有防风林，午后半阴" />
               </Form.Item>
             </Col>
-            <Col span={24}>
-              <Form.Item name="colonyCodes" label="安排群号（同一群跨地块重叠即冲突）">
-                <Select mode="multiple" options={colonies.map((item) => ({ value: item.code, label: `${item.code}（${item.species} ${item.strengthFrames} 足框）` }))} />
-              </Form.Item>
-            </Col>
           </Row>
           <Form.Item label="经纬度">
             <CoordPicker value={dropCoord} onChange={setDropCoord} orchards={orchards} dropPoints={dropPoints} />
           </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            投放点的蜂群排布（在点 / 排队）由技术员在「撤场安排」页操作；此处只能维护容量与场地信息。
+          </Typography.Text>
         </Form>
       </Modal>
     </div>

@@ -18,8 +18,11 @@ interface ScheduleExportRow {
   bloom: string
   days: number
   suggestBoxes: number
+  acceptance: string
   dropCode: string
+  capacityBoxes: number
   colonyCode: string
+  queued: string
   dropWindow: string
   withdrawTime: string
   owner: string
@@ -35,7 +38,7 @@ export default function ExportPage(): JSX.Element {
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
 
-  /** 授粉安排清单：地块 × 投放点 × 群号 */
+  /** 授粉安排清单：地块 × 投放点 × 群号（含验收结论与排队队列） */
   const scheduleRows = useMemo<ScheduleExportRow[]>(() => {
     const rows: ScheduleExportRow[] = []
     orchards.forEach((orchard: Orchard) => {
@@ -46,29 +49,36 @@ export default function ExportPage(): JSX.Element {
         areaMu: orchard.areaMu,
         bloom: `${orchard.bloomStart} ~ ${orchard.bloomEnd}`,
         days: bloomDays(orchard),
-        suggestBoxes: suggestColonyBoxes(orchard)
+        suggestBoxes: suggestColonyBoxes(orchard),
+        acceptance: orchard.acceptance
       }
       if (points.length === 0) {
-        rows.push({ ...base, dropCode: '—', colonyCode: '—', dropWindow: '—', withdrawTime: '—', owner: '—' })
+        rows.push({ ...base, dropCode: '—', capacityBoxes: 0, colonyCode: '—', queued: '—', dropWindow: '—', withdrawTime: '—', owner: '—' })
         return
       }
       points.forEach((point: DropPoint) => {
-        if (point.colonyCodes.length === 0) {
+        const placed = point.colonyCodes
+        const queuedText = point.waitingColonyCodes.length > 0 ? point.waitingColonyCodes.join('、') : '—'
+        if (placed.length === 0) {
           rows.push({
             ...base,
             dropCode: point.code,
-            colonyCode: '待分配',
+            capacityBoxes: point.capacityBoxes,
+            colonyCode: '待投放',
+            queued: queuedText,
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
             owner: point.owner || '—'
           })
           return
         }
-        point.colonyCodes.forEach((code) => {
+        placed.forEach((code) => {
           rows.push({
             ...base,
             dropCode: point.code,
+            capacityBoxes: point.capacityBoxes,
             colonyCode: code,
+            queued: queuedText,
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
             owner: point.owner || '—'
@@ -107,8 +117,11 @@ export default function ExportPage(): JSX.Element {
       { key: 'bloom', label: '盛花期' },
       { key: 'days', label: '花期天数' },
       { key: 'suggestBoxes', label: '建议箱数' },
+      { key: 'acceptance', label: '验收结论' },
       { key: 'dropCode', label: '投放点' },
-      { key: 'colonyCode', label: '群号' },
+      { key: 'capacityBoxes', label: '容量(箱)' },
+      { key: 'colonyCode', label: '在点群号' },
+      { key: 'queued', label: '排队群号' },
       { key: 'dropWindow', label: '投放时间窗' },
       { key: 'withdrawTime', label: '撤场时间' },
       { key: 'owner', label: '责任人' }
@@ -186,14 +199,16 @@ export default function ExportPage(): JSX.Element {
             pagination={false}
             columns={[
               { title: '地块', dataIndex: 'orchard', key: 'orchard' },
-              { title: '作物', dataIndex: 'crop', key: 'crop', width: 80 },
-              { title: '面积(亩)', dataIndex: 'areaMu', key: 'area', width: 90 },
+              { title: '作物', dataIndex: 'crop', key: 'crop', width: 70 },
+              { title: '面积(亩)', dataIndex: 'areaMu', key: 'area', width: 80 },
               { title: '盛花期', dataIndex: 'bloom', key: 'bloom' },
-              { title: '天数', dataIndex: 'days', key: 'days', width: 70 },
-              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 90 },
-              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 90 },
-              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 90 },
-              { title: '投放时间窗', dataIndex: 'dropWindow', key: 'window' },
+              { title: '天数', dataIndex: 'days', key: 'days', width: 60 },
+              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 80 },
+              { title: '验收', dataIndex: 'acceptance', key: 'acceptance', width: 80 },
+              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 80 },
+              { title: '容量', dataIndex: 'capacityBoxes', key: 'cap', width: 60 },
+              { title: '在点群号', dataIndex: 'colonyCode', key: 'colony', width: 80 },
+              { title: '排队群号', dataIndex: 'queued', key: 'queued' },
               { title: '撤场时间', dataIndex: 'withdrawTime', key: 'withdraw' },
               { title: '责任人', dataIndex: 'owner', key: 'owner' }
             ]}
