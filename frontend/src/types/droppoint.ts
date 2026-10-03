@@ -1,4 +1,4 @@
-/** DropPoint 投放点 */
+/** DropPoint 投放点（地块、容量等由托管队维护；群号安排归技术员，见 Deployment） */
 export interface DropPoint {
   id: string
   orchardId: string
@@ -18,6 +18,4 @@ export interface DropPoint {
   withdrawTime: string
   /** 责任人 */
   owner: string
-  /** 该投放点安排的群号（用于冲突判定） */
-  colonyCodes: string[]
 }

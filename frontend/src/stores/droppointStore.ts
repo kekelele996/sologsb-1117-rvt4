@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { DropPoint } from '@/types'
 import { db, deleteRow, loadAll, putRow } from '@/hooks/usePersistentStore'
+import { deploymentStore } from '@/stores/deploymentStore'
 
 export interface DropPointState {
   rows: DropPoint[]
@@ -24,11 +25,14 @@ export const droppointStore = create<DropPointState>((set, get) => ({
     await get().hydrate()
   },
   remove: async (id) => {
+    // 删除投放点前，先把点上的蜂群退回待投放（容量变化后技术员重新排布）
+    await deploymentStore.getState().releaseByDropPoint(id)
     await deleteRow<DropPoint>(db.dropPoints, id)
     await get().hydrate()
   },
   removeByOrchard: async (orchardId) => {
     const targets = get().rows.filter((row) => row.orchardId === orchardId)
+    await Promise.all(targets.map((row) => deploymentStore.getState().releaseByDropPoint(row.id)))
     await Promise.all(targets.map((row) => deleteRow<DropPoint>(db.dropPoints, row.id)))
     await get().hydrate()
   }

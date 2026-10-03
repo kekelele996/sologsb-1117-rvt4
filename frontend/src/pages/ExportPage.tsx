@@ -1,18 +1,22 @@
 import { useMemo, useState } from 'react'
 import { Button, Card, Col, Radio, Row, Space, Table, Tag, Typography, message } from 'antd'
 import dayjs from 'dayjs'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { BeeColony, DropPoint, Orchard, TransitRoute, WithdrawalPlan } from '@/types'
 import { suggestColonyBoxes } from '@/types'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
+import { deploymentStore } from '@/stores/deploymentStore'
+import { withdrawalStore } from '@/stores/withdrawalStore'
 import { routeStore } from '@/stores/routeStore'
 import { downloadCsv, downloadJson } from '@/utils/export'
 import { bloomDays } from '@/utils/geo'
+import { isPlanStale } from '@/utils/schedule'
 
 interface ScheduleExportRow {
   orchard: string
+  acceptance: string
   crop: string
   areaMu: number
   bloom: string
@@ -20,6 +24,7 @@ interface ScheduleExportRow {
   suggestBoxes: number
   dropCode: string
   colonyCode: string
+  deployStatus: string
   dropWindow: string
   withdrawTime: string
   owner: string
@@ -30,18 +35,23 @@ export default function ExportPage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
+  const deployments = usePersistentStore(deploymentStore, (state) => state.rows)
+  const withdrawals = usePersistentStore(withdrawalStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape')
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
+  const colonyById = useMemo(() => new Map(colonies.map((item) => [item.id, item])), [colonies])
+  const pointById = useMemo(() => new Map(dropPoints.map((item) => [item.id, item])), [dropPoints])
 
-  /** 授粉安排清单：地块 × 投放点 × 群号 */
+  /** 授粉安排清单：地块 × 投放点 × 投放/排队群号（数据源为技术员的投放安排） */
   const scheduleRows = useMemo<ScheduleExportRow[]>(() => {
     const rows: ScheduleExportRow[] = []
     orchards.forEach((orchard: Orchard) => {
       const points = dropPoints.filter((item) => item.orchardId === orchard.id)
       const base = {
         orchard: orchard.name,
+        acceptance: orchard.acceptance,
         crop: orchard.crop,
         areaMu: orchard.areaMu,
         bloom: `${orchard.bloomStart} ~ ${orchard.bloomEnd}`,
@@ -49,26 +59,31 @@ export default function ExportPage(): JSX.Element {
         suggestBoxes: suggestColonyBoxes(orchard)
       }
       if (points.length === 0) {
-        rows.push({ ...base, dropCode: '—', colonyCode: '—', dropWindow: '—', withdrawTime: '—', owner: '—' })
+        rows.push({ ...base, dropCode: '—', colonyCode: '—', deployStatus: '—', dropWindow: '—', withdrawTime: '—', owner: '—' })
         return
       }
       points.forEach((point: DropPoint) => {
-        if (point.colonyCodes.length === 0) {
+        const deps = deployments
+          .filter((item) => item.dropPointId === point.id)
+          .sort((a, b) => a.queuedAt - b.queuedAt)
+        if (deps.length === 0) {
           rows.push({
             ...base,
             dropCode: point.code,
             colonyCode: '待分配',
+            deployStatus: '空箱位',
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
             owner: point.owner || '—'
           })
           return
         }
-        point.colonyCodes.forEach((code) => {
+        deps.forEach((dep) => {
           rows.push({
             ...base,
             dropCode: point.code,
-            colonyCode: code,
+            colonyCode: colonyById.get(dep.colonyId)?.code ?? '?',
+            deployStatus: dep.status,
             dropWindow: point.dropWindow,
             withdrawTime: point.withdrawTime,
             owner: point.owner || '—'
@@ -77,7 +92,7 @@ export default function ExportPage(): JSX.Element {
       })
     })
     return rows
-  }, [orchards, dropPoints])
+  }, [orchards, dropPoints, deployments, colonyById])
 
   const routeRows = useMemo(
     () =>
@@ -99,9 +114,30 @@ export default function ExportPage(): JSX.Element {
     [routes, dropPoints, orchards]
   )
 
+  /** 撤场安排（标注是否已因花期/容量变更失效） */
+  const withdrawalRows = useMemo(
+    () =>
+      withdrawals.map((plan: WithdrawalPlan) => {
+        const orchard = orchards.find((item) => item.id === plan.orchardId)
+        const points = dropPoints.filter((item) => item.orchardId === plan.orchardId)
+        const stale = orchard ? isPlanStale(plan, orchard, points) : true
+        return {
+          orchard: orchardName(plan.orchardId),
+          acceptance: orchard?.acceptance ?? '待验收',
+          withdrawAt: plan.withdrawAt.replace('T', ' '),
+          vehicleType: plan.vehicleType,
+          status: stale && plan.status === '待执行' ? '已失效·待重算' : plan.status,
+          note: plan.note || '—'
+        }
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [withdrawals, orchards, dropPoints]
+  )
+
   function exportSchedule(): void {
     downloadCsv('授粉安排清单.csv', scheduleRows as unknown as Record<string, unknown>[], [
       { key: 'orchard', label: '地块' },
+      { key: 'acceptance', label: '验收结论' },
       { key: 'crop', label: '作物' },
       { key: 'areaMu', label: '面积(亩)' },
       { key: 'bloom', label: '盛花期' },
@@ -109,11 +145,24 @@ export default function ExportPage(): JSX.Element {
       { key: 'suggestBoxes', label: '建议箱数' },
       { key: 'dropCode', label: '投放点' },
       { key: 'colonyCode', label: '群号' },
+      { key: 'deployStatus', label: '投放状态' },
       { key: 'dropWindow', label: '投放时间窗' },
-      { key: 'withdrawTime', label: '撤场时间' },
+      { key: 'withdrawTime', label: '撤场参考' },
       { key: 'owner', label: '责任人' }
     ])
     message.success('授粉安排清单已导出')
+  }
+
+  function exportWithdrawals(): void {
+    downloadCsv('撤场安排表.csv', withdrawalRows as unknown as Record<string, unknown>[], [
+      { key: 'orchard', label: '地块' },
+      { key: 'acceptance', label: '验收结论' },
+      { key: 'withdrawAt', label: '撤场时刻' },
+      { key: 'vehicleType', label: '车辆' },
+      { key: 'status', label: '状态' },
+      { key: 'note', label: '备注' }
+    ])
+    message.success('撤场安排表已导出')
   }
 
   function exportRoutes(): void {
@@ -136,6 +185,8 @@ export default function ExportPage(): JSX.Element {
       orchards,
       colonies,
       dropPoints,
+      deployments,
+      withdrawals,
       routes
     })
     message.success('全量数据已导出为 JSON 备份')
@@ -148,7 +199,7 @@ export default function ExportPage(): JSX.Element {
         <div>
           <h2 className="page-title">导出与打印</h2>
           <p className="page-sub">
-            导出授粉安排清单（地块、群号、投放点、时刻、里程）与转场路线表，或直接使用打印视图现场交底。
+            导出授粉安排清单（地块、验收、群号、投放点、排队）、撤场安排表与转场路线表，或直接使用打印视图现场交底。
           </p>
         </div>
         <Space>
@@ -165,12 +216,14 @@ export default function ExportPage(): JSX.Element {
           <Button type="primary" onClick={exportSchedule}>
             导出授粉安排清单（CSV）
           </Button>
+          <Button onClick={exportWithdrawals}>导出撤场安排表（CSV）</Button>
           <Button onClick={exportRoutes}>导出转场路线表（CSV）</Button>
           <Button onClick={exportBackup}>导出全量 JSON 备份</Button>
           <Tag>地块 {orchards.length}</Tag>
           <Tag>蜂群 {colonies.length}</Tag>
           <Tag>投放点 {dropPoints.length}</Tag>
-          <Tag>路线 {routes.length}</Tag>
+          <Tag>投放安排 {deployments.length}</Tag>
+          <Tag>撤场安排 {withdrawals.length}</Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             生成时间 {dayjs().format('YYYY-MM-DD HH:mm')}
           </Typography.Text>
@@ -186,16 +239,33 @@ export default function ExportPage(): JSX.Element {
             pagination={false}
             columns={[
               { title: '地块', dataIndex: 'orchard', key: 'orchard' },
-              { title: '作物', dataIndex: 'crop', key: 'crop', width: 80 },
-              { title: '面积(亩)', dataIndex: 'areaMu', key: 'area', width: 90 },
+              { title: '验收', dataIndex: 'acceptance', key: 'acceptance', width: 80 },
+              { title: '作物', dataIndex: 'crop', key: 'crop', width: 70 },
               { title: '盛花期', dataIndex: 'bloom', key: 'bloom' },
-              { title: '天数', dataIndex: 'days', key: 'days', width: 70 },
-              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 90 },
-              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 90 },
-              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 90 },
+              { title: '建议箱数', dataIndex: 'suggestBoxes', key: 'suggest', width: 80 },
+              { title: '投放点', dataIndex: 'dropCode', key: 'drop', width: 80 },
+              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 80 },
+              { title: '投放状态', dataIndex: 'deployStatus', key: 'deployStatus', width: 90 },
               { title: '投放时间窗', dataIndex: 'dropWindow', key: 'window' },
-              { title: '撤场时间', dataIndex: 'withdrawTime', key: 'withdraw' },
+              { title: '撤场参考', dataIndex: 'withdrawTime', key: 'withdraw' },
               { title: '责任人', dataIndex: 'owner', key: 'owner' }
+            ]}
+          />
+        </Card>
+
+        <Card size="small" title={`撤场安排表（${withdrawalRows.length} 份）`} style={{ marginBottom: 16 }}>
+          <Table
+            dataSource={withdrawalRows}
+            rowKey={(record, index) => `${record.orchard}-${index ?? 0}`}
+            size="small"
+            pagination={false}
+            columns={[
+              { title: '地块', dataIndex: 'orchard', key: 'orchard' },
+              { title: '验收结论', dataIndex: 'acceptance', key: 'acceptance', width: 90 },
+              { title: '撤场时刻', dataIndex: 'withdrawAt', key: 'withdrawAt', width: 160 },
+              { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 100 },
+              { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
+              { title: '备注', dataIndex: 'note', key: 'note' }
             ]}
           />
         </Card>
@@ -224,13 +294,18 @@ export default function ExportPage(): JSX.Element {
           <Card size="small" title="蜂群投放一览（按群号）">
             <Space direction="vertical">
               {colonies.map((colony: BeeColony) => {
-                const points = dropPoints.filter((item) => item.colonyCodes.includes(colony.code))
+                const deps = deployments.filter((item) => item.colonyId === colony.id)
                 return (
                   <Typography.Text key={colony.id}>
                     <Tag color="cyan">{colony.code}</Tag>
                     {colony.species} · {colony.strengthFrames} 足框 ·{' '}
-                    {points.length > 0
-                      ? points.map((item) => `${item.code}@${orchardName(item.orchardId)}`).join('、')
+                    {deps.length > 0
+                      ? deps
+                          .map((dep) => {
+                            const point = pointById.get(dep.dropPointId)
+                            return `${point?.code ?? '?'}@${orchardName(dep.orchardId)}（${dep.status}）`
+                          })
+                          .join('、')
                       : '尚未安排投放点'}
                   </Typography.Text>
                 )
@@ -241,10 +316,10 @@ export default function ExportPage(): JSX.Element {
         <Col xs={24} md={12}>
           <Card size="small" title="导出说明">
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 6 }}>
-              1. 授粉安排清单按「地块 × 投放点 × 群号」展开，可直接给蜂场与园主核对；
+              1. 授粉安排清单按「地块 × 投放点 × 群号」展开，标注已投放/排队状态与托管队验收结论，可直接给技术员与园主核对；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 6 }}>
-              2. 转场路线表包含里程、耗时、车辆与风险备注，实际执行情况可在“转场路线规划”页回填；
+              2. 撤场安排表中的「已失效·待重算」表示托管队改过花期或容量，技术员需在投放与撤场页重算；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 0 }}>
               3. 点击「打印视图」后再选择打印机或另存 PDF；数据全部来自浏览器本地 IndexedDB。

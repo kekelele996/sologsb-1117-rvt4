@@ -6,6 +6,10 @@ export type Crop = (typeof CROPS)[number]
 export const ACCESSIBILITIES = ['大车可达', '仅小车', '需步行'] as const
 export type Accessibility = (typeof ACCESSIBILITIES)[number]
 
+/** 验收结论（托管队按季末坐果给出） */
+export const ACCEPTANCES = ['待验收', '达标', '不达标'] as const
+export type Acceptance = (typeof ACCEPTANCES)[number]
+
 /** Orchard 果园地块 */
 export interface Orchard {
   id: string
@@ -27,6 +31,8 @@ export interface Orchard {
   accessibility: Accessibility
   /** 历史授粉年份 */
   historyYears: number[]
+  /** 季末验收结论：待验收 / 达标 / 不达标（旧数据迁移补「待验收」） */
+  acceptance: Acceptance
   note: string
 }
 

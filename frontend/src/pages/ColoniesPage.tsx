@@ -7,12 +7,16 @@ import StatusTag from '@/components/common/StatusTag'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { orchardStore } from '@/stores/orchardStore'
+import { droppointStore } from '@/stores/droppointStore'
+import { deploymentStore } from '@/stores/deploymentStore'
 import { uid } from '@/utils/id'
 
 /** 蜂群台账：按群势与状态筛选，支持批量改状态与记录检查备注 */
 export default function ColoniesPage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
+  const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
+  const deployments = usePersistentStore(deploymentStore, (state) => state.rows)
 
   const [statusFilter, setStatusFilter] = useState<ColonyStatus | ''>('')
   const [minFrames, setMinFrames] = useState(0)
@@ -45,6 +49,24 @@ export default function ColoniesPage(): JSX.Element {
 
   function orchardName(id: string): string {
     return orchards.find((item) => item.id === id)?.name ?? '未分配地块'
+  }
+
+  /** 技术员投放安排摘要：投放点编号@地块（已投放/排队中） */
+  function deploymentHint(colonyId: string): JSX.Element {
+    const deps = deployments.filter((item) => item.colonyId === colonyId)
+    if (deps.length === 0) return <Typography.Text type="secondary">—</Typography.Text>
+    return (
+      <Space wrap size={4}>
+        {deps.map((dep) => {
+          const point = dropPoints.find((item) => item.id === dep.dropPointId)
+          return (
+            <Tag key={dep.id} color={dep.status === '已投放' ? 'cyan' : 'orange'}>
+              {point ? `${point.code}@${orchardName(dep.orchardId)}` : '?'} · {dep.status}
+            </Tag>
+          )
+        })}
+      </Space>
+    )
   }
 
   function openCreate(): void {
@@ -200,6 +222,11 @@ export default function ColoniesPage(): JSX.Element {
               title: '当前所在地块',
               key: 'orchard',
               render: (_, record: BeeColony) => (record.currentOrchardId ? orchardName(record.currentOrchardId) : '—')
+            },
+            {
+              title: '投放安排',
+              key: 'deployment',
+              render: (_, record: BeeColony) => deploymentHint(record.id)
             },
             {
               title: '状态',

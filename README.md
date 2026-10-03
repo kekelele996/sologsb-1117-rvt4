@@ -55,6 +55,14 @@ npm run dev        # http://localhost:21817
 npm run build      # 类型检查 + 生产构建
 ```
 
+可选：用内存版 IndexedDB 跑一遍容量/排队/验收/失效/迁移的端到端校验脚本（不写入 `package.json`）：
+
+```bash
+cd frontend
+npm install --no-save fake-indexeddb
+npx tsx scripts/verify.mts
+```
+
 ## 五、目录结构
 
 ```
@@ -66,40 +74,59 @@ sologsb-1117/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # orchard.ts / colony.ts / droppoint.ts / route.ts / index.ts
-│       ├── stores/             # orchardStore / colonyStore / droppointStore / routeStore（Zustand）
+│       ├── types/              # orchard（含验收结论）/ colony / droppoint / deployment / withdrawal / route
+│       ├── stores/             # orchardStore / colonyStore / droppointStore / deploymentStore / withdrawalStore / routeStore
 │       ├── components/common/  # RouteMap / FlowerWindowBar / StatusTag / CoordPicker
 │       ├── hooks/              # useAmap / usePersistentStore
-│       ├── pages/              # SchedulePage / OrchardsPage / ColoniesPage / RoutesPage / ExportPage
+│       ├── pages/              # SchedulePage / OrchardsPage / ColoniesPage / DeployPage / RoutesPage / ExportPage
 │       ├── router/index.tsx
-│       └── utils/              # geo.ts / export.ts / id.ts
+│       └── utils/              # geo.ts / schedule.ts / export.ts / id.ts
 ```
 
 ## 六、数据模型与存储
 
 | 模型 | 说明 | Dexie 表 |
 | --- | --- | --- |
-| Orchard 果园地块 | 地块名、作物、面积、经纬度、盛花期起止、需蜂强度（箱/亩）、园主联系方式、可达性、历史授粉年份 | `orchards` |
+| Orchard 果园地块 | 地块名、作物、面积、经纬度、盛花期起止、需蜂强度（箱/亩）、园主联系方式、可达性、历史授粉年份、**季末验收结论（待验收/达标/不达标，托管队按坐果给出）** | `orchards` |
 | BeeColony 蜂群 | 群号、蜂种、群势（足框）、箱型、当前所在地块、状态（待投放/在园/转场中/回场）、最近检查日期、健康备注 | `colonies` |
-| DropPoint 投放点 | 所属地块、坐标、编号、可容纳箱数、遮阴条件、水源距离、投放时间窗、撤场时间、责任人、安排群号 | `dropPoints` |
+| DropPoint 投放点 | 所属地块、坐标、编号、可容纳箱数、遮阴条件、水源距离、投放时间窗、撤场时间、责任人（地块与容量归托管队） | `dropPoints` |
+| Deployment 投放安排 | 技术员把蜂群排到投放点的记录：群、投放点、状态（已投放/排队中）、入队序号；箱数不超容量，装不下 FIFO 排队 | `deployments` |
+| WithdrawalPlan 撤场安排 | 按地块编排撤场时刻/车辆/备注，固化花期与容量依据快照；托管队改花期或容量后自动判定失效，需重算才能执行 | `withdrawals` |
 | TransitRoute 转场路线 | 出发/到达投放点、预计里程与耗时、车辆类型、出发时刻、风险备注、实际记录 | `routes` |
 
 - 数据库名 `gbbeeroute`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史投放点补齐「可容纳箱数」（默认 8 箱）；
+- `version(3)` 升级迁移：① 旧地块没有验收结论，统一补「待验收」；② 旧投放点上的「安排群号」迁移为技术员投放安排（按容量落箱，装不下的转排队），群号不再挂在投放点上；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
+
+## 职责划分（两边各管各的）
+
+| 角色 | 页面 | 负责内容 |
+| --- | --- | --- |
+| 托管队 | 「地块与验收」 | 地块档案、投放点与容量、季末按坐果出验收结论（待验收/达标/不达标） |
+| 技术员 | 「投放与撤场」 | 蜂群排到投放点（不超容量、装不下排队、可调整排队顺序、撤下自动补位）、撤场编排与执行 |
+
+联动规则：
+
+- 验收标记**不达标**：该地块已投放/排队的蜂群全部退回「待投放」池等待补投，撤场安排作废；
+- 托管队**改盛花期或投放点容量**（含增删投放点）：对应地块的撤场安排标记「已失效·待重算」，执行被锁定，技术员重算后恢复；容量缩小时按排队顺序把多出的群退回排队；
+- 验收达标且撤场安排有效时，技术员才能执行撤场，执行后地块上蜂群统一「回场」，可赶往下个果园。
 
 ## 七、主要页面
 
 | 路由 | 功能 |
 | --- | --- |
-| `/` | 季内授粉安排总表：花期条带 + 已投放群体，冲突（同一蜂群被排入花期重叠的不同地块）标红并汇总 |
-| `/orchards` | 果园地块管理：面积与需蜂强度自动算建议箱数、可达性标记、花期重叠提示、投放点维护（含坐标拾取） |
-| `/colonies` | 蜂群台账：按群势与状态筛选，批量改状态、批量记录检查备注 |
+| `/` | 季内授粉安排总表：花期条带 + 已投放/排队群体 + 验收结论，冲突（同一蜂群被排入花期重叠的不同地块）标红并汇总 |
+| `/orchards` | 【托管队】果园地块管理：面积与需蜂强度自动算建议箱数、投放点与容量维护（含坐标拾取）、季末验收结论 |
+| `/colonies` | 蜂群台账：按群势与状态筛选，批量改状态、批量记录检查备注，显示各群投放安排 |
+| `/deploy` | 【技术员】投放与排队：待投放池 → 投放点（容量约束 + FIFO 排队 + 自动补位）；撤场安排：编排、失效重算、执行回场 |
 | `/routes` | 转场路线规划：地图依次选点生成顺序与里程，拖动或上下移动调整顺序并实时重算，写回路线表 |
-| `/export` | 导出授粉安排清单 / 转场路线表（CSV）、全量 JSON 备份，并提供横向/纵向打印视图 |
+| `/export` | 导出授粉安排清单 / 撤场安排表 / 转场路线表（CSV）、全量 JSON 备份，并提供横向/纵向打印视图 |
 
 ## 八、计算约定
 
 - 建议箱数 = ⌈面积(亩) × 需蜂强度(箱/亩)⌉，最少 1 箱；
+- 投放点排群：按入队顺序 FIFO 占箱，已投放数 ≤ 容量；新排入装不下即「排队中」，撤下或扩容后队首自动补位；
+- 撤场安排失效判定：固化的盛花期起止、投放点容量摘要（编号:容量 排序拼接）与当前数据不一致即失效，重算后可执行；
 - 转场里程按 Haversine 球面距离累计，耗时按平均 32 km/h + 0.25 h 装卸估算；
 - 花期重叠：两地块盛花期区间交集天数 ≥ 1 即视为重叠；同一群号在重叠期内被排入两个地块 → 冲突。

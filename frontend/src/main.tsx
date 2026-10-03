@@ -8,6 +8,8 @@ import { seedDemoData, stampDbVersion } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
+import { deploymentStore } from '@/stores/deploymentStore'
+import { withdrawalStore } from '@/stores/withdrawalStore'
 import { routeStore } from '@/stores/routeStore'
 import '@/styles/index.css'
 
@@ -18,6 +20,8 @@ async function bootstrap(): Promise<void> {
   await orchardStore.getState().hydrate()
   await colonyStore.getState().hydrate()
   await droppointStore.getState().hydrate()
+  await deploymentStore.getState().hydrate()
+  await withdrawalStore.getState().hydrate()
   await routeStore.getState().hydrate()
 }
 
